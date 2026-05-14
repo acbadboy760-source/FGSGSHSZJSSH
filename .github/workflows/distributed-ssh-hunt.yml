@@ -462,7 +462,7 @@ jobs:
           </manifest>
           XMLEOF
 
-          # ----- android/app/build.gradle.kts -----
+          # ----- android/app/build.gradle.kts (اصلاح‌شده) -----
           cat > android/app/build.gradle.kts << 'GRADLEEOF'
           plugins {
               id("com.android.application")
@@ -479,8 +479,10 @@ jobs:
                   targetCompatibility = JavaVersion.VERSION_1_8
               }
 
-              kotlinOptions {
-                  jvmTarget = "1.8"
+              kotlin {
+                  compilerOptions {
+                      jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+                  }
               }
 
               defaultConfig {
@@ -492,8 +494,8 @@ jobs:
               }
 
               buildTypes {
-                  release {
-                      signingConfig = signingConfigs.debug
+                  debug {
+                      // No signing config needed for debug builds
                   }
               }
           }
@@ -509,15 +511,7 @@ jobs:
       - name: ساخت APK (Debug)
         run: flutter build apk --debug --split-per-abi
 
-      - name: نمایش فایل‌های ساخته‌شده
-        run: |
-          echo "📁 محتوای پوشه خروجی:"
-          ls -la build/app/outputs/flutter-apk/
-          echo "تعداد فایل‌های apk:"
-          find build/app/outputs/flutter-apk/ -name "*.apk" -type f | wc -l
-
       - name: آپلود APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apocalypse-net
