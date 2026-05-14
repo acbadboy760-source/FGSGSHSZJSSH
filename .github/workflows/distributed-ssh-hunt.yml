@@ -1,4 +1,4 @@
-name: Build ApocalypseNet APK
+name: Build ApocalypseNet APK + Upload
 
 on:
   workflow_dispatch:
@@ -527,4 +527,21 @@ jobs:
           git add apk/
           git commit -m "📱 Add latest APK build" || true
           git pull --rebase || true
+          git push || true
+
+      - name: آپلود APK به transfer.sh و دریافت لینک
+        run: |
+          echo "📤 در حال آپلود APK به transfer.sh..."
+          for apk in apk/*.apk; do
+            echo "   آپلود $(basename "$apk")..."
+            LINK=$(curl --upload-file "$apk" https://transfer.sh/$(basename "$apk"))
+            echo "🔗 **لینک دانلود:** $LINK"
+            echo "$(basename "$apk"): $LINK" >> upload_links.txt
+          done
+          echo "✅ لینک‌ها در upload_links.txt ذخیره شد."
+
+      - name: ذخیره لینک‌ها در مخزن
+        run: |
+          git add upload_links.txt
+          git commit -m "🔗 Add download links" || true
           git push || true
