@@ -103,7 +103,7 @@ jobs:
                       f.write(f"Shard {SHARD_ID} Report\nNo targets found\n")
                   os.system(f'git add {REPORT_FILE} && git commit -m "Shard {SHARD_ID} empty" && git push 2>/dev/null || true')
                   print('بدون هدف، پایان')
-                  return
+                  return  # با کد موفقیت 0 تمام می‌شود
 
               usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi', 'oracle']
               cache_file = Path('cache') / f'dominator_cache_shard_{SHARD_ID}.json'
@@ -180,7 +180,7 @@ jobs:
           main()
           SCANNER_EOF
           
-          # ساختن task_list.json
+          # ساختن task_list.json (بدون تغییر)
           python3 -c "
           import os, json, random, ipaddress, requests
           SHARD_COUNT = int(os.environ['SHARD_COUNT'])
@@ -255,6 +255,7 @@ jobs:
     name: "Shard ${{ matrix.shard }}"
     needs: prepare
     runs-on: ubuntu-latest
+    continue-on-error: true  # <-- مهم: حتی با خطا هم بقیهٔ شاردها و مرحلهٔ ادغام اجرا شوند
     strategy:
       fail-fast: false
       matrix:
@@ -277,9 +278,21 @@ jobs:
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: python3 scanner.py
 
+      # در صورت وجود خطا، لاگ آن را چاپ کن (برای دیباگ)
+      - name: نمایش لاگ خطا (در صورت وجود)
+        if: failure()
+        run: |
+          if [ -f error_shard_${{ matrix.shard }}.log ]; then
+            echo "محتوای لاگ خطا:"
+            cat error_shard_${{ matrix.shard }}.log
+          else
+            echo "فایل لاگ خطا یافت نشد."
+          fi
+
   merge:
     needs: scan_shard
     runs-on: ubuntu-latest
+    if: always()  # <-- مهم: حتی اگر شاردها شکست خوردند، این مرحله اجرا شود
     steps:
       - uses: actions/checkout@v4
       
