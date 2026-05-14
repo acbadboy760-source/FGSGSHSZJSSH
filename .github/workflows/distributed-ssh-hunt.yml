@@ -16,11 +16,10 @@ jobs:
 
       - name: ایجاد ساختار پروژه
         run: |
-          flutter create --platforms android .
-          # پاک کردن محتوای پیش‌فرض lib/main.dart
+          flutter create --platforms android --project-name apocalypse_net .
           rm -f lib/main.dart
 
-      - name: نوشتن فایل‌های Dart و تنظیمات
+      - name: نوشتن تمام فایل‌های Dart و تنظیمات
         run: |
           # ----- pubspec.yaml -----
           cat > pubspec.yaml << 'EOF'
@@ -35,7 +34,6 @@ jobs:
           dependencies:
             flutter:
               sdk: flutter
-            wifi_direct: ^0.2.0
             google_fonts: ^6.1.0
             animated_text_kit: ^4.2.2
 
@@ -91,28 +89,26 @@ jobs:
           mkdir -p lib/mesh
           cat > lib/mesh/mesh_manager.dart << 'DARTEOF'
           import 'dart:async';
-          import 'package:wifi_direct/wifi_direct.dart';
+          import 'package:flutter/services.dart';
 
           class MeshManager {
             final List<Map<String, dynamic>> peers = [];
             final List<String> messages = [];
             Function? onPeersChanged;
             Function? onMessageReceived;
-            StreamSubscription? _peerSub;
 
-            Future<void> init({required String userName}) async {
-              _peerSub = WifiDirect.onPeersChanged.listen((list) {
-                peers.clear();
-                for (var p in list) {
-                  peers.add({
-                    'name': p.deviceName,
-                    'address': p.address,
-                    'status': p.status.toString(),
-                  });
+            static const EventChannel _peerChannel = EventChannel('apocalypse_net/peers');
+
+            Future<void> init() async {
+              _peerChannel.receiveBroadcastStream().listen((data) {
+                if (data is List) {
+                  peers.clear();
+                  for (var p in data) {
+                    peers.add(Map<String, dynamic>.from(p));
+                  }
+                  onPeersChanged?.call();
                 }
-                onPeersChanged?.call();
               });
-              await WifiDirect.startDiscovery();
             }
 
             Future<void> sendText(String text) async {
@@ -120,10 +116,7 @@ jobs:
               onMessageReceived?.call();
             }
 
-            void dispose() {
-              _peerSub?.cancel();
-              WifiDirect.stopDiscovery();
-            }
+            void dispose() {}
           }
           DARTEOF
 
@@ -425,7 +418,7 @@ jobs:
             }
 
             Future<void> _initMesh() async {
-              await _meshManager.init(userName: 'کاوشگر');
+              await _meshManager.init();
               setState(() => _initialized = true);
             }
 
@@ -480,7 +473,7 @@ jobs:
           </manifest>
           XMLEOF
 
-          # ----- android/app/build.gradle.kts (minSdk 21) -----
+          # ----- android/app/build.gradle.kts -----
           cat > android/app/build.gradle.kts << 'GRADLEEOF'
           plugins {
               id("com.android.application")
