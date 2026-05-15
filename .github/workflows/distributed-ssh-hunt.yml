@@ -24,7 +24,7 @@ jobs:
 
       - name: نوشتن تمام فایل‌های Dart و تنظیمات
         run: |
-          # ----- pubspec.yaml -----
+          # ----- pubspec.yaml (بدون google_fonts) -----
           cat > pubspec.yaml << 'EOF'
           name: apocalypse_net
           description: "اینترنت آخرالزمان"
@@ -37,7 +37,6 @@ jobs:
           dependencies:
             flutter:
               sdk: flutter
-            google_fonts: ^6.1.0
             animated_text_kit: ^4.2.2
 
           dev_dependencies:
@@ -48,11 +47,10 @@ jobs:
             uses-material-design: true
           EOF
 
-          # ----- lib/theme.dart -----
+          # ----- lib/theme.dart (بدون google_fonts) -----
           mkdir -p lib
           cat > lib/theme.dart << 'DARTEOF'
           import 'package:flutter/material.dart';
-          import 'package:google_fonts/google_fonts.dart';
 
           class ApocalypseTheme {
             static const Color background = Color(0xFF0A0E14);
@@ -66,15 +64,18 @@ jobs:
                   brightness: Brightness.dark,
                   scaffoldBackgroundColor: background,
                   primaryColor: neonGreen,
+                  fontFamily: 'RobotoMono',
                   appBarTheme: AppBarTheme(
                     backgroundColor: darkSurface,
-                    titleTextStyle: GoogleFonts.orbitron(
-                      fontSize: 20, fontWeight: FontWeight.bold, color: neonGreen),
+                    titleTextStyle: TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.bold, color: neonGreen,
+                      fontFamily: 'RobotoMono',
+                    ),
                     iconTheme: const IconThemeData(color: neonGreen),
                   ),
                   textTheme: TextTheme(
-                    bodyLarge: GoogleFonts.robotoMono(color: textPrimary),
-                    bodyMedium: GoogleFonts.robotoMono(color: textSecondary),
+                    bodyLarge: TextStyle(color: textPrimary, fontFamily: 'RobotoMono'),
+                    bodyMedium: TextStyle(color: textSecondary, fontFamily: 'RobotoMono'),
                   ),
                   elevatedButtonTheme: ElevatedButtonThemeData(
                     style: ElevatedButton.styleFrom(
@@ -87,30 +88,18 @@ jobs:
           }
           DARTEOF
 
-          # ----- lib/mesh/mesh_manager.dart -----
+          # ----- lib/mesh/mesh_manager.dart (بدون EventChannel) -----
           mkdir -p lib/mesh
           cat > lib/mesh/mesh_manager.dart << 'DARTEOF'
-          import 'dart:async';
-          import 'package:flutter/services.dart';
-
           class MeshManager {
             final List<Map<String, dynamic>> peers = [];
             final List<String> messages = [];
             Function? onPeersChanged;
             Function? onMessageReceived;
 
-            static const EventChannel _peerChannel = EventChannel('apocalypse_net/peers');
-
             Future<void> init() async {
-              _peerChannel.receiveBroadcastStream().listen((data) {
-                if (data is List) {
-                  peers.clear();
-                  for (var p in data) {
-                    peers.add(Map<String, dynamic>.from(p));
-                  }
-                  onPeersChanged?.call();
-                }
-              });
+              // در نسخه فعلی فقط شبیه‌سازی
+              onPeersChanged?.call();
             }
 
             Future<void> sendText(String text) async {
@@ -465,7 +454,7 @@ jobs:
           </manifest>
           XMLEOF
 
-          # ----- android/app/build.gradle.kts (اصلاح‌شده) -----
+          # ----- android/app/build.gradle.kts -----
           cat > android/app/build.gradle.kts << 'GRADLEEOF'
           plugins {
               id("com.android.application")
@@ -529,8 +518,7 @@ jobs:
           git pull --rebase || true
           git push || true
 
-      - name: دریافت لینک خام گیت‌هاب (fallback)
-        id: rawlink
+      - name: دریافت لینک خام گیت‌هاب
         run: |
           REPO="${{ github.repository }}"
           BRANCH="main"
@@ -540,23 +528,6 @@ jobs:
             echo "https://raw.githubusercontent.com/$REPO/$BRANCH/apk/$fname" >> upload_links.txt
           done
           cat upload_links.txt
-
-      - name: آپلود APK به file.io (اختیاری)
-        run: |
-          echo "📤 تلاش برای آپلود به file.io..."
-          for apk in apk/*.apk; do
-            fname=$(basename "$apk")
-            echo "   آپلود $fname..."
-            RESPONSE=$(curl -s -F "file=@$apk" https://file.io)
-            LINK=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('link','FAILED'))")
-            if [ "$LINK" != "FAILED" ] && [ -n "$LINK" ]; then
-              echo "🔗 file.io: $LINK"
-              echo "$fname (file.io): $LINK" >> upload_links.txt
-            else
-              echo "⚠️ file.io در دسترس نیست. از لینک raw گیت‌هاب استفاده کنید."
-            fi
-          done
-          echo "✅ لینک‌ها در upload_links.txt ذخیره شد."
 
       - name: ذخیره لینک‌ها در مخزن
         run: |
