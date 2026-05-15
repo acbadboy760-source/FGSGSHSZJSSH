@@ -529,19 +529,37 @@ jobs:
           git pull --rebase || true
           git push || true
 
-      - name: آپلود APK به transfer.sh و دریافت لینک
+      - name: دریافت لینک خام گیت‌هاب (fallback)
+        id: rawlink
         run: |
-          echo "📤 در حال آپلود APK به transfer.sh..."
+          REPO="${{ github.repository }}"
+          BRANCH="main"
+          echo "لینک‌های دانلود مستقیم از گیت‌هاب (raw):" > upload_links.txt
           for apk in apk/*.apk; do
-            echo "   آپلود $(basename "$apk")..."
-            LINK=$(curl --upload-file "$apk" https://transfer.sh/$(basename "$apk"))
-            echo "🔗 **لینک دانلود:** $LINK"
-            echo "$(basename "$apk"): $LINK" >> upload_links.txt
+            fname=$(basename "$apk")
+            echo "https://raw.githubusercontent.com/$REPO/$BRANCH/apk/$fname" >> upload_links.txt
+          done
+          cat upload_links.txt
+
+      - name: آپلود APK به file.io (اختیاری)
+        run: |
+          echo "📤 تلاش برای آپلود به file.io..."
+          for apk in apk/*.apk; do
+            fname=$(basename "$apk")
+            echo "   آپلود $fname..."
+            RESPONSE=$(curl -s -F "file=@$apk" https://file.io)
+            LINK=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('link','FAILED'))")
+            if [ "$LINK" != "FAILED" ] && [ -n "$LINK" ]; then
+              echo "🔗 file.io: $LINK"
+              echo "$fname (file.io): $LINK" >> upload_links.txt
+            else
+              echo "⚠️ file.io در دسترس نیست. از لینک raw گیت‌هاب استفاده کنید."
+            fi
           done
           echo "✅ لینک‌ها در upload_links.txt ذخیره شد."
 
       - name: ذخیره لینک‌ها در مخزن
         run: |
           git add upload_links.txt
-          git commit -m "🔗 Add download links" || true
+          git commit -m "🔗 Update download links" || true
           git push || true
